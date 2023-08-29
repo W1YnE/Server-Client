@@ -1,168 +1,159 @@
-#include <iostream>
-#include <sys/socket.h>
-#include <arpa/inet.h>
-#include <netinet/in.h>
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
 #include <unistd.h>
-#include <cstdlib>
-#include <cstdio>
-#include <cstring>
-#include <pthread.h>
-#include <sys/select.h>
-#include <algorithm>
-#include <sys/time.h>
-#include <sys/types.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <bits/stdc++.h>
+#include <thread>
+#include <mutex>
+#include "account.pb.h"
 
 using namespace std;
+using namespace account::protobuf;
 
-// 客户端处理线程函数
-void* clientHandler(void* arg)
-{
-    int clientfd = *(int*)arg; // 获取客户端套接字描述符
-    char buf[100];
+map<int, string> clients; // <socket, username>
+mutex clients_mutex;
 
-    while (true)
-    {
-        // 从客户端接收数据
-        int n = read(clientfd, buf, sizeof(buf) - 1);
-        if (n == 0)
-        {
-            cout << "Client disconnected: " << clientfd << endl;
-            break;
-        }
-        else if (n > 0)
-        {
-            buf[n] = '\0';
-            cout << "Received data from client " << clientfd << ": " << buf << endl;
-
-            // 发送响应给客户端
-            fgets(buf, sizeof(buf), stdin);
-            send(clientfd, buf, strlen(buf), 0);
-        }
-    }
-
-    close(clientfd); // 关闭客户端套接字
-    delete (int*)arg; // 释放动态分配的内存
-    pthread_exit(NULL); // 退出线程
+void start_requist(sockaddr_in &addr_s, int sock, const char *ip, int port) {
+    memset(&addr_s, 0, sizeof(addr_s));      
+    addr_s.sin_family = AF_INET;             
+    addr_s.sin_addr.s_addr = inet_addr(ip);  
+    addr_s.sin_port = htons(port);           
+    bind(sock, (struct sockaddr *)&addr_s, sizeof(addr_s));
 }
 
-int main()
-{
-    int sockfd, sfd;
-    struct sockaddr_in sock_addr;
-    int i, op;
-    int maxfd, maxi, n;
-
-    fd_set rset, allset;
-    int client[1024]; // 存储客户端套接字描述符的数组
-
-    sockfd = socket(AF_INET, SOCK_STREAM, 0); // 创建服务器套接字
-    if (sockfd < 0)
-    {
-        printf("Failed to create socket\n");
-        return -1;
+void read_requist(account_struct &res, int sock_c) {
+    char buff[1000];
+    memset(buff, 0, sizeof buff);
+    read(sock_c, buff, sizeof(buff) - 1);
+    if (strlen(buff) != 0) {
+        res.ParseFromArray(buff, sizeof(buff));
     }
+}
 
-    bzero(&sock_addr, sizeof(sock_addr));
-    sock_addr.sin_family = AF_INET;
-    sock_addr.sin_port = htons(8000);
-    sock_addr.sin_addr.s_addr = INADDR_ANY; // 服务器绑定的 IP 地址为 INADDR_ANY，表示可以接受任意 IP 地址的连接
+void handle_client(int client_socket, string username) {
+    char client_message[256];
+    while (1) {
+        memset(client_message, 0, sizeof(client_message));
+        ssize_t bytes_read = read(client_socket, client_message, sizeof(client_message) - 1);
 
-    op = bind(sockfd, (struct sockaddr*)&sock_addr, sizeof(sock_addr)); // 将服务器套接字绑定到指定的 IP 地址和端口上
-    if (op < 0)
-    {
-        printf("Failed to bind socket\n");
-        close(sockfd);
-        return -1;
-    }
-
-    op = listen(sockfd, 4); // 开始监听连接请求，同时维护的最大连接数为 4
-    if (op < 0)
-    {
-        printf("Listen error\n");
-        close(sockfd);
-        return -1;
-    }
-
-    int clientfd;
-    struct sockaddr_in client_addr;
-    socklen_t len = sizeof(struct sockaddr);
-
-    maxfd = sockfd;
-    maxi = -1;
-    for (i = 0; i < 1024; i++)
-        client[i] = -1; // 初始化客户端套接字描述符数组
-
-    FD_ZERO(&allset);
-    FD_SET(sockfd, &allset); // 将监听套接字添加到文件描述符集合中
-
-    while (true)
-    {
-        rset = allset;
-        op = select(maxfd + 1, &rset, NULL, NULL, NULL); // 使用 select 监听套接字集合中的事件
-        if (op < 0)
-        {
-            cout << "Select error\n";
-            return -1;
+        if (bytes_read <= 0 || strcmp(client_message, "logout") == 0) {
+            break;
         }
 
-        if (FD_ISSET(sockfd, &rset)) // 如果监听套接字有事件发生，表示有新的连接请求
-        {
-            clientfd = accept(sockfd, (struct sockaddr*)&client_addr, &len); // 接受新的连接请求
+        // Display on the server
+        printf("%s: %s\n", username.c_str(), client_message);
 
-            if (clientfd < 0)
-            {
-                printf("Accept error\n");
-                return -1;
+        // Forward the message to all connected clients
+        string full_message = username + ": " + client_message;
+        clients_mutex.lock();
+        for (auto &client : clients) {
+            if (client.first != client_socket) {
+                write(client.first, full_message.c_str(), full_message.size() + 1);
             }
+        }
+        clients_mutex.unlock();
+    }
 
-            char clientip[32] = "";
-            inet_ntop(AF_INET, &client_addr.sin_addr, clientip, 16);
-            printf("Client connected: IP %s, Port %d\n", clientip, ntohs(client_addr.sin_port));
+    clients_mutex.lock();
+    clients.erase(client_socket);
+    clients_mutex.unlock();
 
-            for (i = 0; i < 1024; i++)
-            {
-                if (client[i] < 0) // 找到一个空闲的位置存储客户端套接字描述符
-                {
-                    client[i] = clientfd;
-                    break;
+    close(client_socket);
+}
+
+int main() {
+    int sock_s;
+    if ((sock_s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)) == -1) {
+        perror("Create Socket Error\n");
+        exit(1);
+    } else {
+        printf("Create SocketID: %d\n", sock_s);
+    }
+
+    sockaddr_in addr_s;
+    start_requist(addr_s, sock_s, "127.0.0.1", 8888);
+    listen(sock_s, 20);
+
+    while (true) {
+        printf("----------------------------------------------------begin\n");
+        
+        struct sockaddr_in addr_c;
+        socklen_t addr_c_size = sizeof(addr_c);
+        int sock_c = accept(sock_s, (struct sockaddr *)&addr_c, &addr_c_size);
+        if (sock_c == -1) {
+            perror("Accept Error");
+            exit(1);
+        }
+
+        account_struct res;
+        read_requist(res, sock_c);
+
+        cout << "是否是注册请求：" << res.is_register() << endl;
+        cout << "账号：" << res.account() << endl;
+        cout << "密码：" << res.password() << endl;
+        cout << "IP：" << res.hostip() << endl;
+        cout << "操作时间：" << res.time() << endl;
+
+        string path = "Accounts/" + res.account();
+        const char *account = path.c_str();
+        const char *password = res.password().c_str();
+
+        char rebuff[100];
+        memset(rebuff, 0, sizeof(rebuff));
+
+        if (res.is_register()) {
+            if (access(account, F_OK) == 0) {
+                rebuff[0] = 'N';
+                printf("账号已存在\n");
+            } else {
+                rebuff[0] = 'Y';
+                FILE *file = fopen(account, "a+");
+                if (file == NULL) {
+                    rebuff[0] = 'N';
+                    printf("生成文件失败\n");
+                } else {
+                    fprintf(file, "%s", password);
+                    fflush(file);
+                    fclose(file);
+                    printf("注册成功\n");
                 }
             }
-
-            if (i == 1024) // 如果客户端连接数超过了数组的大小，打印错误信息并退出
-            {
-                cout << "Too many clients\n";
-                return -1;
+        } else {
+            if (access(account, F_OK) != 0) {
+                rebuff[0] = 'N';
+                printf("账号不存在\n");
+            } else {
+                FILE *file = fopen(account, "r");
+                char pwd[100];
+                memset(pwd, 0, sizeof pwd);
+                fscanf(file, "%s", pwd);
+                if (strcmp(pwd, password) == 0) {
+                    rebuff[0] = 'Y';
+                    printf("登陆成功\n");
+                } else {
+                    rebuff[0] = 'N';
+                    printf("密码不正确\n");
+                }
             }
-
-            FD_SET(clientfd, &allset); // 将客户端套接字添加到文件描述符集合中
-            if (clientfd > maxfd)
-                maxfd = clientfd; // 更新最大文件描述符值
-
-            maxi = max(maxi, i); // 更新最大索引值
-
-            if (--op == 0)
-                continue;
         }
+        write(sock_c, rebuff, sizeof(rebuff));
 
-        for (i = 0; i <= maxi; i++)
-        {
-            sfd = client[i];
-            if (sfd < 0)
-                continue;
-            if (FD_ISSET(sfd, &rset)) // 如果客户端套接字有事件发生，表示有数据可读
-            {
-                pthread_t tid;
-                int* arg = new int;
-                *arg = sfd;
-                pthread_create(&tid, NULL, clientHandler, arg); // 创建一个新的线程来处理客户端请求
-                pthread_detach(tid); // 分离线程，使其自行释放资源
+        if (rebuff[0] == 'Y') {
+            clients_mutex.lock();
+            clients[sock_c] = res.account();
+            clients_mutex.unlock();
 
-                if (--op == 0)
-                    break;
-            }
+            thread client_thread(handle_client, sock_c, res.account());
+            client_thread.detach();
+        } else {
+            close(sock_c);
         }
     }
 
-    close(sockfd); // 关闭服务器套接字
+    printf("--------------------------end\n");
+    close(sock_s);
     return 0;
 }

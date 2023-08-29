@@ -1,0 +1,12 @@
+syntax = "proto3";
+package account.protobuf;
+option optimize_for = SPEED ;
+message account_struct
+{
+	bool is_register = 1;
+    string hostip = 2;
+	int32 time = 3;
+	string account = 4;
+	string password = 5;
+}
+
